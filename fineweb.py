@@ -26,7 +26,7 @@ os.makedirs(DATA_CACHE_DIR, exist_ok=True)
 
 # download the dataset
 fw = load_dataset("HuggingFaceFW/fineweb-edu", name=remote_name, split="train")
-
+print(f"finish load dataset {remote_name}")
 # init the tokenizer
 enc = tiktoken.get_encoding("gpt2")
 eot = enc._special_tokens['<|endoftext|>'] # end of text token
@@ -44,10 +44,13 @@ def write_datafile(filename, tokens_np):
     '''
     Save a shard of tokens to disk as a uint16 numpy array, which is very simialr to torch tensors.
     '''
+    print(f"save shard {filename}")
     np.save(filename, tokens_np)
 
 # tokenize all documents and write output shards, each of shard_size tokens (last shard has remainder)
 nprocs = max(1, os.cpu_count()//2)
+print(f"using {nprocs} processes")
+print(f"tokenizing and writing shards to {DATA_CACHE_DIR}")
 with mp.Pool(nprocs) as pool:
     shard_index = 0
     # preallocate buffer to hold current shard
