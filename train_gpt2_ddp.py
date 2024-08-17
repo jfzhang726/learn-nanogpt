@@ -466,7 +466,7 @@ class DataLoaderLite:
         # get shard names
         #data_root = "edu_fineweb10B"
         data_root = "/content/drive/MyDrive/Colab Notebooks/nanogpt/edu_fineweb10B/"
-        shards = os.listdir(self.data_root)
+        shards = os.listdir(data_root)
         shards = [os.path.join(data_root, x) for x in shards if split in x]
         shards = sorted(shards)
         self.shards = shards
