@@ -670,7 +670,7 @@ else:
         device = "cuda"
     elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available(): # mac
         device = "mps"
-    logger.info("Not using DDP, using device: {device}")
+    logger.info(f"Not using DDP, using device: {device}")
 
 
 # all the processes (GPUs) run the same copy of code below, not aware of the existence of other copies
@@ -682,6 +682,9 @@ if torch.cuda.is_available():
 
 
 total_batch_size = 524288 # 2**19, ~0.5M tokens as specified in GPT3(?) paper, and make the number "nice" (power of 2)
+# on my colab instance with 1 GPU L4, set B = 16, will use 18.9/22.5 GB GPU memory, process about 35K tokens/sec,
+# will use ~80 hours to finish 10B tokens;
+# Andrej uses GPU A100-SXM4-80GB, with 80G memory, can set B=64, 8 GPU process about 1.5M tokens/sec, can finish # 10B tokens in 1.85 hrs
 B = 16 # micro batch size (per GPU)
 T = 1024 # sequence length (per GPU)
 # 16 * 1024 * ddp_world_size tokens in one forward 
@@ -768,10 +771,16 @@ def get_lr(it):
 # config optimizer on raw_model instead of ddp model
 optimizer = raw_model.configure_optimizers(weight_decay=0.1, learning_rate=6e-4, device=device)
 
+
+import tiktoken
+enc = tiktoken.get_encoding("gpt2")
+
+
 for step in range(max_steps):
     t0 = time.time() # start time
 
     # evaluate on validation set every 100 steps
+    # Training data is roughly infinite so training loss and val loss should be about the same.
     if step % 100 == 0 and master_process:
         model.eval()
         val_loader.reset() # reset to start of data
@@ -789,6 +798,60 @@ for step in range(max_steps):
             torch.distributed.all_reduce(val_loss_accum, op=torch.distributed.ReduceOp.AVG)
         if master_process:
             logger.info(f"step {step} val loss {val_loss_accum.item():.4f}")
+
+    # generate sample every 100 steps.
+    # Karpathy says torch.compile throws error in code below. 
+    # Either disable torch.compiler to generate samples which makes training a bit slower,
+    # or disable sample generation to use torch.compiler.
+    if step > 0 and step % 100 == 0 and False:
+        num_return_sequences = 4
+        max_length = 32
+
+        model.eval() # set model to evaluation mode
+
+        # prefix the input
+        prefix = "Hello, I'm a language model,"
+        # get indices of tokens
+        # can check what tokens would be at https://tiktokenizer.vercel.app/
+        # got [15496, 11, 314, 1101, 257, 3303, 2746, 11]
+        tokens = enc.encode(prefix) 
+        logger.info(f"Tokens: {tokens}")
+        tokens = torch.tensor(tokens, dtype=torch.long) # shape (L)
+        tokens = tokens.unsqueeze(0) # shape (1, L)
+        tokens = tokens.repeat(num_return_sequences, 1) # shape (N, L)
+        xgen = tokens.to(device)
+
+        # Generate tokens following input. 
+        # set different random state to different processes
+        sample_random_generator = torch.Generator(device=device)
+        sample_random_generator.manual_seed(42 + ddp_rank)
+        
+        while xgen.size(1) < max_length:
+            # forward pass to get logits
+            with torch.no_grad(): 
+                logits = model(xgen) # (B, T, vocab_size)
+                # take only the logits at the last position
+                logits = logits[:, -1, :] # (B, vocab_size)
+                # apply softmax to get probabilities
+                probs = F.softmax(logits, dim=-1) # (B, vocab_size)
+                # do top-k sampling of 50 (huggingface pipeline default)
+                # topk_probs is (5, 50) and topk_indices is (5, 50)
+                topk_probs, topk_indices = torch.topk(probs, k=50, dim=-1) # (B, 50)
+                # select a token from the top-k probabilities
+                ix = torch.multinomial(topk_probs, num_samples=1, generator=sample_random_generator) # (B, 1)
+                # gather the corresponding token indices
+                x_next = torch.gather(topk_indices, -1, ix) # (B, 1)
+                # append to the sequence
+                xgen = torch.cat((xgen, x_next), dim=1)
+        # print the generated tokens
+        # for seq in xgen:
+        #     text = enc.decode(seq.tolist())
+        #     logger.info(f"Generated text: {text}")        
+        for i in range(num_return_sequences):
+            seq = xgen[i, :max_length]
+            text = enc.decode(seq.tolist())
+            logger.info(f"rank {ddp_rank} Generated sample {i}: {text}")
+
 
     # training
     model.train()
