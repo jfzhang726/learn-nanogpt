@@ -3,3 +3,4 @@ torch
 matplotlib
 pytz
 tiktoken
+datasets
