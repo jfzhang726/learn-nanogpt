@@ -460,24 +460,28 @@ class DataLoaderLite:
         # logger.info(f"Loaded {len(tokens)} tokens")
         # logger.info(f"1 epoch = {len(self.tokens) // (self.B * self.T * self.num_processes)} batches")
 
-        # Unlike working small file like tiny shakespear, we tokenized large data in advance, 
-        # and save tokenized data in a number of numpy files (see code edu_fineweb.py)
+        # Unlike working with small file like tiny shakespear, in case of fineweb we tokenized dataset in advance and save token indices in a number of numpy files (see code edu_fineweb.py)
         
         assert split in {'train', 'val'}
         # get shard names
-        data_root = "edu_fineweb10B"
+        #data_root = "edu_fineweb10B"
+        data_root = "/content/drive/MyDrive/Colab Notebooks/nanogpt/edu_fineweb10B/"
         shards = os.listdir(self.data_root)
         shards = [os.path.join(data_root, x) for x in shards if split in x]
         shards = sorted(shards)
         self.shards = shards
-        assert len(shards) > 0, f"No {split} shards found"
+        assert len(self.shards) > 0, f"No {split} shards found"
         if master_process:
-            logger.info(f"Found {len(shards)} {split} shards")
+            logger.info(f"Found {len(self.shards)} {split} shards")
+        self.reset()
+
+    def reset(self):
         # state --- initialize at 1st shard of the split
         # self.current_position = 0 # if not ddp 
         self.current_shard = 0
-        self.tokens = load_tokens(shards[self.current_shard])
+        self.tokens = load_tokens(self.shards[self.current_shard])
         self.current_position = self.B * self.T * self.process_rank # if ddp, initial postion as for one process
+
 
     def next_batch(self):
         B, T = self.B, self.T
@@ -689,6 +693,8 @@ if master_process:
 
 train_loader = DataLoaderLite(B=B, T=T, process_rank=ddp_rank, num_processes=ddp_world_size, split='train') 
 # train_loader = DataLoaderLite(B=16, T=1024) # GPT-2 max length 1024
+val_loader = DataLoaderLite(B=B, T=T, process_rank=ddp_rank, num_processes=ddp_world_size, split='val')
+
 # speed up training by using tf32 (Tensor Float 32)). In Andrej Karpathy's A100 GPU, it is 3x faster. 
 if torch.cuda.is_available():
     torch.set_float32_matmul_precision('high')
@@ -764,6 +770,28 @@ optimizer = raw_model.configure_optimizers(weight_decay=0.1, learning_rate=6e-4,
 
 for step in range(max_steps):
     t0 = time.time() # start time
+
+    # evaluate on validation set every 100 steps
+    if step % 100 == 0 and master_process:
+        model.eval()
+        val_loader.reset() # reset to start of data
+        with torch.no_grad():
+            val_loss_accum = 0.0
+            val_loss_steps = 20
+            for _ in range(val_loss_steps):
+                x, y = val_loader.next_batch()
+                x, y = x.to(device), y.to(device)
+                with torch.autocast(device_type=device, dtype=torch.bfloat16):
+                    logits, loss = model(x, y)
+                loss = loss / val_loss_steps
+                val_loss_accum += loss.detach() 
+        if ddp:
+            torch.distributed.all_reduce(val_loss_accum, op=torch.distributed.ReduceOp.AVG)
+        if master_process:
+            logger.info(f"step {step} val loss {val_loss_accum.item():.4f}")
+
+    # training
+    model.train()
     optimizer.zero_grad()
     loss_accum = 0.0
     for micro_step in range(gradient_accumulation_steps):
