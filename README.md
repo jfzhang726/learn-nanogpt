@@ -20,11 +20,12 @@ Learn Andrej Karpathy's nano-gpt tutorial
 ## Download tokenized files from Huggingface-Hub
 Option 1: git clone dataset on Huggingface-hub
 
-    Huggingface-hub datasets are git repositories. Simple command git clone https://huggingface.co/datasets/jfzhang/edu_fineweb10B_tokens downloads 100 files. The files are parquet instead .npy because datasets library convert .npy files to parquet. 
+Huggingface-hub datasets are git repositories. Simple command git clone 
+https://huggingface.co/datasets/jfzhang/edu_fineweb10B_tokens 
+downloads 100 files. The files are parquet instead .npy because datasets library convert .npy files to parquet. 
 
-    After data set is cloned, simple code to convert .parquet files back to .npy files.
-
-    ```python
+After data set is cloned, simple code to convert .parquet files back to .npy files.
+```python
         import pandas as pd
         import numpy as np
         import os
@@ -33,7 +34,7 @@ Option 1: git clone dataset on Huggingface-hub
         df_shard = pd.read_parquet(os.path.join("/content/edu_fineweb10B_tokens/data/", fn))
         shard = np.array(df_shard["tokens"][0], dtype=np.uint16)
         np.save(os.path.join("./data/", fn), shard)
-    ```
+```
 
 Option 2: use datasets.load_dataset()
 
