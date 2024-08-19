@@ -436,6 +436,11 @@ class GPT(nn.Module):
 # to make model close to GPT2.
 # 
 
+
+#data_root = "edu_fineweb10B"
+# data_root = "/content/drive/MyDrive/Colab Notebooks/nanogpt/edu_fineweb10B/"
+data_root = "edu_fineweb10B"
+
 def load_tokens(filename):
     '''
     load a shard file which is a numpy file
@@ -464,8 +469,7 @@ class DataLoaderLite:
         
         assert split in {'train', 'val'}
         # get shard names
-        #data_root = "edu_fineweb10B"
-        data_root = "/content/drive/MyDrive/Colab Notebooks/nanogpt/edu_fineweb10B/"
+
         shards = os.listdir(data_root)
         shards = [os.path.join(data_root, x) for x in shards if split in x]
         shards = sorted(shards)
@@ -713,7 +717,9 @@ model = GPT(GPTConfig(vocab_size=50304)) #model = GPT(GPTConfig())
 model.to(device)
 #  Karpathy showed that the single line of torch.compile achieves 2.3x speedup.
 #  He recommended to use torch.compile by default.  
-model = torch.compile(model) # it is not working in my vs code. 
+use_compile = False # torch.compile breaks evaluation code
+if use_compile:
+    model = torch.compile(model) # it is not working in my vs code. 
 if ddp:
     # wrap the model in the DistributedDataParallel container
     # https://pytorch.org/docs/stable/generated/torch.nn.parallel.DistributedDataParallel.html
@@ -771,6 +777,13 @@ def get_lr(it):
 # config optimizer on raw_model instead of ddp model
 optimizer = raw_model.configure_optimizers(weight_decay=0.1, learning_rate=6e-4, device=device)
 
+# create log dir to store checkpoints and logs
+
+log_dir = "logs"
+os.makedirs(log_dir, exist_ok=True)
+log_file = os.path.join(log_dir, f"log.txt")
+with open(log_file, "w") as f: # start with empty file
+    pass
 
 import tiktoken
 enc = tiktoken.get_encoding("gpt2")
@@ -790,7 +803,8 @@ for step in range(max_steps):
             for _ in range(val_loss_steps):
                 x, y = val_loader.next_batch()
                 x, y = x.to(device), y.to(device)
-                with torch.autocast(device_type=device, dtype=torch.bfloat16):
+                # device_type must be "cuda" instead of "cuda:0", "cuda:1" ...
+                with torch.autocast(device_type=device.split(":")[0], dtype=torch.bfloat16):
                     logits, loss = model(x, y)
                 loss = loss / val_loss_steps
                 val_loss_accum += loss.detach() 
@@ -861,7 +875,8 @@ for step in range(max_steps):
         # get a data batch
         x, y = train_loader.next_batch()
         x, y = x.to(device), y.to(device)
-        with torch.autocast(device_type=device, dtype=torch.bfloat16):
+        # device_type must be "cuda" instead of "cuda:0", "cuda:1" ...
+        with torch.autocast(device_type=device.split(":")[0], dtype=torch.bfloat16):
             logits, loss = model(x, y)
         # turn script execution into interactive mode
         #import code; code.interact(local=locals())

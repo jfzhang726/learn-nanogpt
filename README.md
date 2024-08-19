@@ -16,3 +16,25 @@ Learn Andrej Karpathy's nano-gpt tutorial
 - Colab CPU instance RAM is too small to load all 100 files, so do push for mulitple times. 
     - Evch push will overwrite the list of files in README.md with the file names in current push, which will make README.md meta data section contains only the files pushed in the last time. When dataset.load_dataset(), only the files in the last push are retrieved. 
     - Solution is simply to delete the file names in README.md. 
+
+## Download tokenized files from Huggingface-Hub
+Option 1: git clone dataset on Huggingface-hub
+
+    Huggingface-hub datasets are git repositories. Simple command git clone https://huggingface.co/datasets/jfzhang/edu_fineweb10B_tokens downloads 100 files. The files are parquet instead .npy because datasets library convert .npy files to parquet. 
+
+    After data set is cloned, simple code to convert .parquet files back to .npy files.
+
+    ```python
+        import pandas as pd
+        import numpy as np
+        import os
+        for fn in os.listdir("/content/edu_fineweb10B_tokens/data/"):
+        print(fn)
+        df_shard = pd.read_parquet(os.path.join("/content/edu_fineweb10B_tokens/data/", fn))
+        shard = np.array(df_shard["tokens"][0], dtype=np.uint16)
+        np.save(os.path.join("./data/", fn), shard)
+    ```
+
+Option 2: use datasets.load_dataset()
+
+    Use
