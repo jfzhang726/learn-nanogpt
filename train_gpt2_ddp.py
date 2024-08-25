@@ -867,18 +867,18 @@ for step in range(max_steps):
             num_total += 1
             num_correct_norm += (pred_norm == label)
             # reduce the states across all processes
-            if ddp:
-                num_total = torch.tensor(num_total).to(device=device, dtype=torch.long)
-                num_correct_norm = torch.tensor(num_correct_norm).to(device=device, dtype=torch.long)
-                torch.distributed.all_reduce(num_total, op=torch.distributed.ReduceOp.SUM)
-                torch.distributed.all_reduce(num_correct_norm, op=torch.distributed.ReduceOp.SUM)
-                num_total = num_total.item()
-                num_correct_norm = num_correct_norm.item()
-            acc_norm = num_correct_norm / num_total
-            if master_process:
-                logger.info(f"step {step} hellaswag acc: {num_correct_norm}/{num_total}={acc_norm:.4f}")
-                with open(log_file, "a") as f:
-                    f.write(f"{step} hella {acc_norm:.4f}\n")
+        if ddp:
+            num_total = torch.tensor(num_total).to(device=device, dtype=torch.long)
+            num_correct_norm = torch.tensor(num_correct_norm).to(device=device, dtype=torch.long)
+            torch.distributed.all_reduce(num_total, op=torch.distributed.ReduceOp.SUM)
+            torch.distributed.all_reduce(num_correct_norm, op=torch.distributed.ReduceOp.SUM)
+            num_total = num_total.item()
+            num_correct_norm = num_correct_norm.item()
+        acc_norm = num_correct_norm / num_total
+        if master_process:
+            logger.info(f"step {step} hellaswag acc: {num_correct_norm}/{num_total}={acc_norm:.4f}")
+            with open(log_file, "a") as f:
+                f.write(f"{step} hella {acc_norm:.4f}\n")
     # generate sample every 100 steps.
     # Karpathy says torch.compile throws error in code below. 
     # Either disable torch.compiler to generate samples which makes training a bit slower,
