@@ -826,195 +826,197 @@ def get_most_likely_row(tokens, mask, logits):
     pred_norm = avg_loss_per_row.argmin().item() # get the index of the lowest loss
     return pred_norm
 
-for step in range(max_steps):
-    t0 = time.time() # start time
-    last_step = (step == max_steps - 1)
-    # evaluate on validation set every 100 steps
-    # Training data is roughly infinite so training loss and val loss should be about the same.
-    if step % 100 == 0 and master_process:
-        model.eval()
-        val_loader.reset() # reset to start of data
-        with torch.no_grad():
-            val_loss_accum = 0.0
-            val_loss_steps = 20
-            for _ in range(val_loss_steps):
-                x, y = val_loader.next_batch()
-                x, y = x.to(device), y.to(device)
-                # device_type must be "cuda" instead of "cuda:0", "cuda:1" ...
-                with torch.autocast(device_type=device.split(":")[0], dtype=torch.bfloat16):
-                    logits, loss = model(x, y)
-                loss = loss / val_loss_steps
-                val_loss_accum += loss.detach() 
-        if ddp:
-            torch.distributed.all_reduce(val_loss_accum, op=torch.distributed.ReduceOp.AVG)
-        if master_process:
-            logger.info(f"step {step} val loss {val_loss_accum.item():.4f}")
-            with open(log_file, "a") as f:
-                f.write(f"{step} val {val_loss_accum.item():.4f}\n")
-            if step > 0 and (step % 5000 == 0 or last_step):
-                # save checkpoint
-                check_point_path = os.path.join(log_dir, f"model_{step:05d}.pt")
-                check_point = {
-                    'model': raw_model.state_dict(),
-                    'config': raw_model.config,
-                    'step': step,
-                    'val_loss': val_loss_accum.item(),
-                    'optimizer': optimizer.state_dict(),
-                    # random seed
-                }
-                torch.save(check_point, check_point_path)
 
-    # evaluate hellaswag
-    if (step % 250 == 0 or last_step) and not use_compile:
-        num_correct_norm = 0
-        num_total = 0
-        for i, example in enumerate(iterate_examples('val')):
-            # each process only do a part of examples
-            if i % ddp_world_size != ddp_rank:
-                continue
-            # render exmaple into tokens and lable
-            _, tokens, mask, label = render_example(example)
-            tokens = tokens.to(device)
-            mask = mask.to(device)
-            # get logits 
+def train():
+    for step in range(max_steps):
+        t0 = time.time() # start time
+        last_step = (step == max_steps - 1)
+        # evaluate on validation set every 100 steps
+        # Training data is roughly infinite so training loss and val loss should be about the same.
+        if step % 100 == 0 and master_process:
+            model.eval()
+            val_loader.reset() # reset to start of data
             with torch.no_grad():
-                with torch.autocast(device_type=device.split(":")[0], dtype=torch.bfloat16):
-                    logits, loss = model(tokens)
-                pred_norm = get_most_likely_row(tokens, mask, logits)
-            num_total += 1
-            num_correct_norm += (pred_norm == label)
-            # reduce the states across all processes
+                val_loss_accum = 0.0
+                val_loss_steps = 20
+                for _ in range(val_loss_steps):
+                    x, y = val_loader.next_batch()
+                    x, y = x.to(device), y.to(device)
+                    # device_type must be "cuda" instead of "cuda:0", "cuda:1" ...
+                    with torch.autocast(device_type=device.split(":")[0], dtype=torch.bfloat16):
+                        logits, loss = model(x, y)
+                    loss = loss / val_loss_steps
+                    val_loss_accum += loss.detach() 
+            if ddp:
+                torch.distributed.all_reduce(val_loss_accum, op=torch.distributed.ReduceOp.AVG)
+            if master_process:
+                logger.info(f"step {step} val loss {val_loss_accum.item():.4f}")
+                with open(log_file, "a") as f:
+                    f.write(f"{step} val {val_loss_accum.item():.4f}\n")
+                if step > 0 and (step % 5000 == 0 or last_step):
+                    # save checkpoint
+                    check_point_path = os.path.join(log_dir, f"model_{step:05d}.pt")
+                    check_point = {
+                        'model': raw_model.state_dict(),
+                        'config': raw_model.config,
+                        'step': step,
+                        'val_loss': val_loss_accum.item(),
+                        'optimizer': optimizer.state_dict(),
+                        # random seed
+                    }
+                    torch.save(check_point, check_point_path)
+
+        # evaluate hellaswag
+        if (step % 250 == 0 or last_step) and not use_compile:
+            num_correct_norm = 0
+            num_total = 0
+            for i, example in enumerate(iterate_examples('val')):
+                # each process only do a part of examples
+                if i % ddp_world_size != ddp_rank:
+                    continue
+                # render exmaple into tokens and lable
+                _, tokens, mask, label = render_example(example)
+                tokens = tokens.to(device)
+                mask = mask.to(device)
+                # get logits 
+                with torch.no_grad():
+                    with torch.autocast(device_type=device.split(":")[0], dtype=torch.bfloat16):
+                        logits, loss = model(tokens)
+                    pred_norm = get_most_likely_row(tokens, mask, logits)
+                num_total += 1
+                num_correct_norm += (pred_norm == label)
+                # reduce the states across all processes
+            if ddp:
+                num_total = torch.tensor(num_total).to(device=device, dtype=torch.long)
+                num_correct_norm = torch.tensor(num_correct_norm).to(device=device, dtype=torch.long)
+                torch.distributed.all_reduce(num_total, op=torch.distributed.ReduceOp.SUM)
+                torch.distributed.all_reduce(num_correct_norm, op=torch.distributed.ReduceOp.SUM)
+                num_total = num_total.item()
+                num_correct_norm = num_correct_norm.item()
+            acc_norm = num_correct_norm / num_total
+            if master_process:
+                logger.info(f"step {step} hellaswag acc: {num_correct_norm}/{num_total}={acc_norm:.4f}")
+                with open(log_file, "a") as f:
+                    f.write(f"{step} hella {acc_norm:.4f}\n")
+        # generate sample every 100 steps.
+        # Karpathy says torch.compile throws error in code below. 
+        # Either disable torch.compiler to generate samples which makes training a bit slower,
+        # or disable sample generation to use torch.compiler.
+        if ((step > 0 and step % 250 == 0) or last_step) and (not use_compile) :
+            num_return_sequences = 4
+            max_length = 32
+
+            model.eval() # set model to evaluation mode
+
+            # prefix the input
+            prefix = "Hello, I'm a language model,"
+            # get indices of tokens
+            # can check what tokens would be at https://tiktokenizer.vercel.app/
+            # got [15496, 11, 314, 1101, 257, 3303, 2746, 11]
+            tokens = enc.encode(prefix) 
+            logger.info(f"Tokens: {tokens}")
+            tokens = torch.tensor(tokens, dtype=torch.long) # shape (L)
+            tokens = tokens.unsqueeze(0) # shape (1, L)
+            tokens = tokens.repeat(num_return_sequences, 1) # shape (N, L)
+            xgen = tokens.to(device)
+
+            # Generate tokens following input. 
+            # set different random state to different processes
+            sample_random_generator = torch.Generator(device=device)
+            sample_random_generator.manual_seed(42 + ddp_rank)
+            
+            while xgen.size(1) < max_length:
+                # forward pass to get logits
+                with torch.no_grad(): 
+                    with torch.autocast(device_type=device.split(":")[0], dtype=torch.bfloat16):
+                        logits, loss = model(xgen) # (B, T, vocab_size)
+                    # take only the logits at the last position
+                    logits = logits[:, -1, :] # (B, vocab_size)
+                    # apply softmax to get probabilities
+                    probs = F.softmax(logits, dim=-1) # (B, vocab_size)
+                    # do top-k sampling of 50 (huggingface pipeline default)
+                    # topk_probs is (5, 50) and topk_indices is (5, 50)
+                    topk_probs, topk_indices = torch.topk(probs, k=50, dim=-1) # (B, 50)
+                    # select a token from the top-k probabilities
+                    ix = torch.multinomial(topk_probs, num_samples=1, generator=sample_random_generator) # (B, 1)
+                    # gather the corresponding token indices
+                    x_next = torch.gather(topk_indices, -1, ix) # (B, 1)
+                    # append to the sequence
+                    xgen = torch.cat((xgen, x_next), dim=1)
+            # print the generated tokens
+            # for seq in xgen:
+            #     text = enc.decode(seq.tolist())
+            #     logger.info(f"Generated text: {text}")        
+            for i in range(num_return_sequences):
+                seq = xgen[i, :max_length]
+                text = enc.decode(seq.tolist())
+                logger.info(f"rank {ddp_rank} Generated sample {i}: {text}")
+
+
+        # training
+        model.train()
+        optimizer.zero_grad()
+        loss_accum = 0.0
+        for micro_step in range(gradient_accumulation_steps):
+            # get a data batch
+            x, y = train_loader.next_batch()
+            x, y = x.to(device), y.to(device)
+            # device_type must be "cuda" instead of "cuda:0", "cuda:1" ...
+            with torch.autocast(device_type=device.split(":")[0], dtype=torch.bfloat16):
+                logits, loss = model(x, y)
+            # turn script execution into interactive mode
+            #import code; code.interact(local=locals())
+
+
+            
+            # scale the loss to account for gradient accumulation.
+            # because gradients add on each successive backward().
+            # addition of gradients corresponds to a SUM in the loss function (cross_entropy here), but 
+            # we want MEAN in the loss function (cross_entropy). So we divide by gradient_accumulation_steps.
+            loss = loss / gradient_accumulation_steps
+            loss_accum += loss.detach() # detach the tensor from computation graph. record accumulated loss for logging
+            
+            # loss.backward() does x.grad += dloss/dx i.e. accumulate gradients. 
+            # If not for gradient accumulation, we would zero gradient before calling loss.backward().
+            # https://pytorch.org/docs/stable/generated/torch.Tensor.backward.html#torch.Tensor.backward
+            # Here we want to accumulate gradients.
+            # Now we have DDP. we don't want ddp to do communication (average) in every step except after the 
+            # last of accumulation steps. 
+            if ddp:
+                model.require_backward_grad_sync = (micro_step + 1 == gradient_accumulation_steps)
+            loss.backward()
+        # Below is for printing loss_accum only. don't confuse it with calculating average of gradients. 
+        # Remember we want to print in main process only, but main process has its own loss_accum. The line below 
+        # calculate average of loss_accum across all ranks, and deposite it on every rank, so main process is able to
+        # print the average of loss_accum of all ranks. 
         if ddp:
-            num_total = torch.tensor(num_total).to(device=device, dtype=torch.long)
-            num_correct_norm = torch.tensor(num_correct_norm).to(device=device, dtype=torch.long)
-            torch.distributed.all_reduce(num_total, op=torch.distributed.ReduceOp.SUM)
-            torch.distributed.all_reduce(num_correct_norm, op=torch.distributed.ReduceOp.SUM)
-            num_total = num_total.item()
-            num_correct_norm = num_correct_norm.item()
-        acc_norm = num_correct_norm / num_total
+            torch.distributed.all_reduce(loss_accum, op=torch.distributed.ReduceOp.AVG)
+        # GPT-3 paper: clip global norm of gradients at 1.0
+        # the norm is sqrt(g1**2 + g2**2 +...) i.e. the length of the vector.
+        # the line below cap norm no more than 1.0.
+        # Sometimes e.g. in case of bad batch, the loss is high then gradient is high, and model is shocked.
+        norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        lr = get_lr(step) # learning rate
+        for param_group in optimizer.param_groups:
+            param_group['lr'] = lr
+
+        
+        optimizer.step()
+        if device == "cuda":
+            torch.cuda.synchronize() # wait for all kernels to finish
+        t1 = time.time() # end time
+        dt = t1 - t0
+        tokens_processed = train_loader.B * train_loader.T * gradient_accumulation_steps * ddp_world_size # all ranks
+        tokens_per_sec = tokens_processed / dt     
+
         if master_process:
-            logger.info(f"step {step} hellaswag acc: {num_correct_norm}/{num_total}={acc_norm:.4f}")
+            logger.info(f"step {step:4d} | lr: {lr:.4e}| loss {loss.item():6f} | accumulated loss: {loss_accum.item():6f} | norm: {norm:.4f} | dt: {dt*1000:.2f}ms, tok/sec: {tokens_per_sec:.2f}")
             with open(log_file, "a") as f:
-                f.write(f"{step} hella {acc_norm:.4f}\n")
-    # generate sample every 100 steps.
-    # Karpathy says torch.compile throws error in code below. 
-    # Either disable torch.compiler to generate samples which makes training a bit slower,
-    # or disable sample generation to use torch.compiler.
-    if ((step > 0 and step % 250 == 0) or last_step) and (not use_compile) :
-        num_return_sequences = 4
-        max_length = 32
-
-        model.eval() # set model to evaluation mode
-
-        # prefix the input
-        prefix = "Hello, I'm a language model,"
-        # get indices of tokens
-        # can check what tokens would be at https://tiktokenizer.vercel.app/
-        # got [15496, 11, 314, 1101, 257, 3303, 2746, 11]
-        tokens = enc.encode(prefix) 
-        logger.info(f"Tokens: {tokens}")
-        tokens = torch.tensor(tokens, dtype=torch.long) # shape (L)
-        tokens = tokens.unsqueeze(0) # shape (1, L)
-        tokens = tokens.repeat(num_return_sequences, 1) # shape (N, L)
-        xgen = tokens.to(device)
-
-        # Generate tokens following input. 
-        # set different random state to different processes
-        sample_random_generator = torch.Generator(device=device)
-        sample_random_generator.manual_seed(42 + ddp_rank)
-        
-        while xgen.size(1) < max_length:
-            # forward pass to get logits
-            with torch.no_grad(): 
-                with torch.autocast(device_type=device.split(":")[0], dtype=torch.bfloat16):
-                    logits, loss = model(xgen) # (B, T, vocab_size)
-                # take only the logits at the last position
-                logits = logits[:, -1, :] # (B, vocab_size)
-                # apply softmax to get probabilities
-                probs = F.softmax(logits, dim=-1) # (B, vocab_size)
-                # do top-k sampling of 50 (huggingface pipeline default)
-                # topk_probs is (5, 50) and topk_indices is (5, 50)
-                topk_probs, topk_indices = torch.topk(probs, k=50, dim=-1) # (B, 50)
-                # select a token from the top-k probabilities
-                ix = torch.multinomial(topk_probs, num_samples=1, generator=sample_random_generator) # (B, 1)
-                # gather the corresponding token indices
-                x_next = torch.gather(topk_indices, -1, ix) # (B, 1)
-                # append to the sequence
-                xgen = torch.cat((xgen, x_next), dim=1)
-        # print the generated tokens
-        # for seq in xgen:
-        #     text = enc.decode(seq.tolist())
-        #     logger.info(f"Generated text: {text}")        
-        for i in range(num_return_sequences):
-            seq = xgen[i, :max_length]
-            text = enc.decode(seq.tolist())
-            logger.info(f"rank {ddp_rank} Generated sample {i}: {text}")
-
-
-    # training
-    model.train()
-    optimizer.zero_grad()
-    loss_accum = 0.0
-    for micro_step in range(gradient_accumulation_steps):
-        # get a data batch
-        x, y = train_loader.next_batch()
-        x, y = x.to(device), y.to(device)
-        # device_type must be "cuda" instead of "cuda:0", "cuda:1" ...
-        with torch.autocast(device_type=device.split(":")[0], dtype=torch.bfloat16):
-            logits, loss = model(x, y)
-        # turn script execution into interactive mode
-        #import code; code.interact(local=locals())
-
-
-        
-        # scale the loss to account for gradient accumulation.
-        # because gradients add on each successive backward().
-        # addition of gradients corresponds to a SUM in the loss function (cross_entropy here), but 
-        # we want MEAN in the loss function (cross_entropy). So we divide by gradient_accumulation_steps.
-        loss = loss / gradient_accumulation_steps
-        loss_accum += loss.detach() # detach the tensor from computation graph. record accumulated loss for logging
-        
-        # loss.backward() does x.grad += dloss/dx i.e. accumulate gradients. 
-        # If not for gradient accumulation, we would zero gradient before calling loss.backward().
-        # https://pytorch.org/docs/stable/generated/torch.Tensor.backward.html#torch.Tensor.backward
-        # Here we want to accumulate gradients.
-        # Now we have DDP. we don't want ddp to do communication (average) in every step except after the 
-        # last of accumulation steps. 
-        if ddp:
-            model.require_backward_grad_sync = (micro_step + 1 == gradient_accumulation_steps)
-        loss.backward()
-    # Below is for printing loss_accum only. don't confuse it with calculating average of gradients. 
-    # Remember we want to print in main process only, but main process has its own loss_accum. The line below 
-    # calculate average of loss_accum across all ranks, and deposite it on every rank, so main process is able to
-    # print the average of loss_accum of all ranks. 
+                f.write(f"{step} train {loss_accum.item():.6f}\n")
+    # otherwise there are warning messages
     if ddp:
-        torch.distributed.all_reduce(loss_accum, op=torch.distributed.ReduceOp.AVG)
-    # GPT-3 paper: clip global norm of gradients at 1.0
-    # the norm is sqrt(g1**2 + g2**2 +...) i.e. the length of the vector.
-    # the line below cap norm no more than 1.0.
-    # Sometimes e.g. in case of bad batch, the loss is high then gradient is high, and model is shocked.
-    norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-    lr = get_lr(step) # learning rate
-    for param_group in optimizer.param_groups:
-        param_group['lr'] = lr
-
-    
-    optimizer.step()
-    if device == "cuda":
-        torch.cuda.synchronize() # wait for all kernels to finish
-    t1 = time.time() # end time
-    dt = t1 - t0
-    tokens_processed = train_loader.B * train_loader.T * gradient_accumulation_steps * ddp_world_size # all ranks
-    tokens_per_sec = tokens_processed / dt     
-
-    if master_process:
-        logger.info(f"step {step:4d} | lr: {lr:.4e}| loss {loss.item():6f} | accumulated loss: {loss_accum.item():6f} | norm: {norm:.4f} | dt: {dt*1000:.2f}ms, tok/sec: {tokens_per_sec:.2f}")
-        with open(log_file, "a") as f:
-            f.write(f"{step} train {loss_accum.item():.6f}\n")
-# otherwise there are warning messages
-if ddp:
-    destroy_process_group()
-# import sys; sys.exit(0)
+        destroy_process_group()
+    # import sys; sys.exit(0)
 
 
 
