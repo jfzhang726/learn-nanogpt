@@ -738,7 +738,11 @@ raw_model = model.module if ddp else model
 # " we use cosine decay for learning rate down to 10% of its value, over 260 billion tokens (after 260
 # billion tokens, training continues at 10% of the original learning rate). There is a linear LR warmup 
 # over the first 375 million tokens. "
-max_lr = 6e-4 # GPT-3 paper <i>Language Models are Few-Shot Learners</i> Table 2.1
+
+# max_lr 6e-4 as per GPT-3 paper <i>Language Models are Few-Shot Learners</i> Table 2.1.
+# However, some people experimented 3 times larger max_lr to make it learn faster. Could try it.
+max_lr = 6e-4  
+
 min_lr = max_lr / 10.0
 
 # warmup_steps = 10
@@ -845,7 +849,20 @@ for step in range(max_steps):
             torch.distributed.all_reduce(val_loss_accum, op=torch.distributed.ReduceOp.AVG)
         if master_process:
             logger.info(f"step {step} val loss {val_loss_accum.item():.4f}")
-
+            with open(log_file, "a") as f:
+                f.write(f"{step} val {val_loss_accum.item():.4f}\n")
+            if step > 0 and (step % 5000 == 0 or last_step):
+                # save checkpoint
+                check_point_path = os.path.join(log_dir, f"model_{step:05d}.pt")
+                check_point = {
+                    'model': raw_model.state_dict(),
+                    'config': raw_model.config,
+                    'step': step,
+                    'val_loss': val_loss_accum.item(),
+                    'optimizer': optimizer.state_dict(),
+                    # random seed
+                }
+                torch.save(check_point, check_point_path)
 
     # evaluate hellaswag
     if (step % 250 == 0 or last_step) and not use_compile:
@@ -910,7 +927,7 @@ for step in range(max_steps):
             # forward pass to get logits
             with torch.no_grad(): 
                 with torch.autocast(device_type=device.split(":")[0], dtype=torch.bfloat16):
-                    logits = model(xgen) # (B, T, vocab_size)
+                    logits, loss = model(xgen) # (B, T, vocab_size)
                 # take only the logits at the last position
                 logits = logits[:, -1, :] # (B, vocab_size)
                 # apply softmax to get probabilities
