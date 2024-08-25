@@ -42,7 +42,9 @@ log_format = "%(asctime)s [%(levelname)s] (%(filename)s:%(lineno)d) - %(message)
 logging.basicConfig(level=logging.DEBUG,
                     format=log_format,
                     datefmt='%Y-%m-%d %H:%M:%S %Z',
-                    handlers=[logging.StreamHandler()])
+                    handlers=[logging.StreamHandler(),
+                              logging.FileHandler('train_gpt2.log') 
+                              ])
 
 # Apply the custom formatter
 for handler in logging.getLogger().handlers:
@@ -787,11 +789,42 @@ with open(log_file, "w") as f: # start with empty file
 
 import tiktoken
 enc = tiktoken.get_encoding("gpt2")
+from hellaswag import iterate_examples, render_example 
 
+# helper function for HellaSwag eval 
+def get_most_likely_row(tokens, mask, logits):
+    # evaluate autoregressive loss at all positions
+    # ... in numpy indicates "as many as needed dimensions", so [..., :-1, :] is equivalent to [:,:,..., :-1, :]
+    # 
+    # torch.Tensor.contiguous(): some tensor operations including Tensor.transpose(), 
+    # Tensor.expand(), Tensor.narrow() and Tensor.view() don't change the content of the tensor, but change the meta data to specify new layout. (On the contrary, operations like Tensor.reshape() combines view() and contiguous() operations and create a new tensor. )
+    # 
+    # Tensor.contiguous() is useful because some torch operations exepect a contiguous tensor, otherwise the indexing might be wrong. PyTorch will either make the memory contiguous or raise an error if the input tensor is not contiguous. When there is an error saying cotiguous tensor is needed, Tensor.contiguous() 
+    # needs to be called explicitly. 
+    # On the other hand, many operations don't need congituous tensor so it is not good to call contiguous() all the time. 
+    # https://discuss.pytorch.org/t/does-contiguous-tensor-affect-training-result/143921
+    # https://stackoverflow.com/questions/48915810/what-does-contiguous-do-in-pytorch
+    shift_logits = logits[..., :-1, :].contiguous() # remove last token
+    shift_tokens = tokens[..., 1:].contiguous() # remove first token
+    flat_shift_logits = shift_logits.view(-1, shift_logits.size(-1)) # flatten logits, 2D
+    flat_shift_tokens = shift_tokens.view(-1) # flatten tokens, 1D
+    # reduction='none' so returns loss of each token instead of a summarized value.   
+    shift_losses = F.cross_entropy(flat_shift_logits, flat_shift_tokens, reduction='none') # 1D. 
+    shift_losses = shift_losses.view(tokens.size(0), -1) # restore 2D
+    # get the average loss just for the completion region (where mask == 1) in each row
+    shift_mask = mask[..., 1:].contiguous() # must shift mask, so start at the last prompt token
+    masked_shift_losses = shift_losses * shift_mask # 0 for tokens not in completion region
+    total_per_row = masked_shift_losses.sum(dim=1) # sum losses for each row
+    num_tokens_per_row = shift_mask.sum(dim=1) # count number of tokens in each row
+    avg_loss_per_row = total_per_row / num_tokens_per_row # average loss for each row
+    # now we have the loss for each of the 4 completions
+    # the one with the lowest loss is the most likely
+    pred_norm = avg_loss_per_row.argmin().item() # get the index of the lowest loss
+    return pred_norm
 
 for step in range(max_steps):
     t0 = time.time() # start time
-
+    last_step = (step == max_steps - 1)
     # evaluate on validation set every 100 steps
     # Training data is roughly infinite so training loss and val loss should be about the same.
     if step % 100 == 0 and master_process:
@@ -813,11 +846,44 @@ for step in range(max_steps):
         if master_process:
             logger.info(f"step {step} val loss {val_loss_accum.item():.4f}")
 
+
+    # evaluate hellaswag
+    if (step % 250 == 0 or last_step) and not use_compile:
+        num_correct_norm = 0
+        num_total = 0
+        for i, example in enumerate(iterate_examples('val')):
+            # each process only do a part of examples
+            if i % ddp_world_size != ddp_rank:
+                continue
+            # render exmaple into tokens and lable
+            _, tokens, mask, label = render_example(example)
+            tokens = tokens.to(device)
+            mask = mask.to(device)
+            # get logits 
+            with torch.no_grad():
+                with torch.autocast(device_type=device.split(":")[0], dtype=torch.bfloat16):
+                    logits, loss = model(tokens)
+                pred_norm = get_most_likely_row(tokens, mask, logits)
+            num_total += 1
+            num_correct_norm += (pred_norm == label)
+            # reduce the states across all processes
+            if ddp:
+                num_total = torch.tensor(num_total).to(device=device, dtype=torch.long)
+                num_correct_norm = torch.tensor(num_correct_norm).to(device=device, dtype=torch.long)
+                torch.distributed.all_reduce(num_total, op=torch.distributed.ReduceOp.SUM)
+                torch.distributed.all_reduce(num_correct_norm, op=torch.distributed.ReduceOp.SUM)
+                num_total = num_total.item()
+                num_correct_norm = num_correct_norm.item()
+            acc_norm = num_correct_norm / num_total
+            if master_process:
+                logger.info(f"step {step} hellaswag acc: {num_correct_norm}/{num_total}={acc_norm:.4f}")
+                with open(log_file, "a") as f:
+                    f.write(f"{step} hella {acc_norm:.4f}\n")
     # generate sample every 100 steps.
     # Karpathy says torch.compile throws error in code below. 
     # Either disable torch.compiler to generate samples which makes training a bit slower,
     # or disable sample generation to use torch.compiler.
-    if step > 0 and step % 100 == 0 and False:
+    if ((step > 0 and step % 250 == 0) or last_step) and (not use_compile) :
         num_return_sequences = 4
         max_length = 32
 
@@ -843,7 +909,8 @@ for step in range(max_steps):
         while xgen.size(1) < max_length:
             # forward pass to get logits
             with torch.no_grad(): 
-                logits = model(xgen) # (B, T, vocab_size)
+                with torch.autocast(device_type=device.split(":")[0], dtype=torch.bfloat16):
+                    logits = model(xgen) # (B, T, vocab_size)
                 # take only the logits at the last position
                 logits = logits[:, -1, :] # (B, vocab_size)
                 # apply softmax to get probabilities
@@ -925,7 +992,8 @@ for step in range(max_steps):
 
     if master_process:
         logger.info(f"step {step:4d} | lr: {lr:.4e}| loss {loss.item():6f} | accumulated loss: {loss_accum.item():6f} | norm: {norm:.4f} | dt: {dt*1000:.2f}ms, tok/sec: {tokens_per_sec:.2f}")
-
+        with open(log_file, "a") as f:
+            f.write(f"{step} train {loss_accum.item():.6f}\n")
 # otherwise there are warning messages
 if ddp:
     destroy_process_group()
