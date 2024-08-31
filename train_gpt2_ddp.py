@@ -401,7 +401,7 @@ class GPT(nn.Module):
         return model
     
 
-    def configure_optimizers(self, weight_decay, learning_rate, device):
+    def configure_optimizers(self, weight_decay, learning_rate, device_type):
         # start with all of the candidate parameters (that require gradients)
         param_dict = {pn: p for pn, p in self.named_parameters() if p.requires_grad}
         # create optim groups, Any parameters that is 2D will be weight decayed, otherwise no.
@@ -420,8 +420,9 @@ class GPT(nn.Module):
         # fused is a lot faster. It 
         # https://pytorch.org/docs/stable/generated/torch.optim.AdamW.html
         fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
-        use_fused = fused_available and 'cuda' in str(device)
-        logger.info(f"use_fused={use_fused}")
+        use_fused = fused_available and 'cuda' == device_type
+        if master_process:
+            logger.info(f"use_fused={use_fused}")
         optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, betas=(0.9, 0.95), eps=1e-8, fused=use_fused)
         return optimizer
 
@@ -677,6 +678,7 @@ else:
     logger.info(f"Not using DDP, using device: {device}")
 
 
+device_type = "cuda" if device.startswith("cuda") else "cpu"
 # all the processes (GPUs) run the same copy of code below, not aware of the existence of other copies
 
 # set random seeds to ensure reproducibility
@@ -785,7 +787,7 @@ def get_lr(it):
 # eps = 1e-8
 #optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, betas=(0.9, 0.95), eps=1e-8)
 # config optimizer on raw_model instead of ddp model
-optimizer = raw_model.configure_optimizers(weight_decay=0.1, learning_rate=6e-4, device=device)
+optimizer = raw_model.configure_optimizers(weight_decay=0.1, learning_rate=6e-4, device_type=device_type)
 
 # create log dir to store checkpoints and logs
 
@@ -837,7 +839,8 @@ def train():
         last_step = (step == max_steps - 1)
         # evaluate on validation set every 100 steps
         # Training data is roughly infinite so training loss and val loss should be about the same.
-        if step % 100 == 0 and master_process:
+        #if step % 250 == 0 and master_process:  # master_process condition is suspicious
+        if step % 250 == 0 or last_step:
             model.eval()
             val_loader.reset() # reset to start of data
             with torch.no_grad():
@@ -858,6 +861,7 @@ def train():
                 with open(log_file, "a") as f:
                     f.write(f"{step} val {val_loss_accum.item():.4f}\n")
                 if step > 0 and (step % 5000 == 0 or last_step):
+                    logger.info(f"saving checkpoint at step {step}")
                     # save checkpoint
                     check_point_path = os.path.join(log_dir, f"model_{step:05d}.pt")
                     check_point = {

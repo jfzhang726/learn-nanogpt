@@ -39,3 +39,12 @@ After data set is cloned, simple code to convert .parquet files back to .npy fil
 Option 2: use datasets.load_dataset()
 
     Use
+
+
+
+
+# Gradient Accumulation vs DP vs DDP
+- Gradient Accumulation: single process with single GPU, accumulate gradients in CPU memory then update parameters. 
+- DP: DataParallel, single process with multiple GPUs, each GPU is a process
+- DDP: DistributedDataParallel, multiple processes with multiple GPUs, each GPU is a process
+https://blog.csdn.net/deephub/article/details/111715288
