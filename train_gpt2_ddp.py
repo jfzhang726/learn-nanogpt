@@ -471,7 +471,13 @@ class DataLoaderLite:
         load a shard file which is a numpy file
         '''
         npt = np.load(filename) # np.uint16, as specified in fineweb.py
-        npt = npt.astype(np.int32) # A10 don't accept np.uint16, convert to int32
+        # A10 don't accept np.uint16, convert to int32. 
+        # A10 supports: float64, float32, float16, complex64, complex128, int64, int32, int16, int8, uint8, and bool.
+        # uint16 covers the numbers 0 to 65535 , while np.int16 covers the numbers −32768 to 32767. 
+        # So uint16 can't be converted to int16, but can be converted to int32.
+        # T4, L4 and A100 accept uint16.
+        if False: # if GPU is A10, convert to int32
+            npt = npt.astype(np.int32) 
         ptt = torch.tensor(npt, dtype=torch.long) # convert to torch.long
         return ptt
 
@@ -681,8 +687,12 @@ if torch.cuda.is_available():
 total_batch_size = 524288 # 2**19, ~0.5M tokens as specified in GPT3(?) paper, and make the number "nice" (power of 2)
 # on my colab instance with 1 GPU L4, set B = 16, will use 18.9/22.5 GB GPU memory, process about 35K tokens/sec,
 # will use ~80 hours to finish 10B tokens;
+# 
+# on lambda lab 1xA10 (24G), set B=16, will use ~20G GPU memory, process about 45K tokens/sec, can finish 10B tokens in 61 hours;
+# A10 does not support uint16 in tokenized training data, so I convert uint16 to int32, which is probably the reason for consuming a bit more memory?
+#  
 # Andrej uses GPU A100-SXM4-80GB, with 80G memory, can set B=64, 8 GPU process about 1.5M tokens/sec, can finish # 10B tokens in 1.85 hrs
-B = 16 # micro batch size (per GPU)
+B = 64 # micro batch size (per GPU)
 T = 1024 # sequence length (per GPU)
 # 16 * 1024 * ddp_world_size tokens in one forward 
 assert total_batch_size % (B*T*ddp_world_size) == 0, "total_batch_size should be divisible by B*T*ddp_world_size"
