@@ -475,8 +475,9 @@ class DataLoaderLite:
         # A10 supports: float64, float32, float16, complex64, complex128, int64, int32, int16, int8, uint8, and bool.
         # uint16 covers the numbers 0 to 65535 , while np.int16 covers the numbers −32768 to 32767. 
         # So uint16 can't be converted to int16, but can be converted to int32.
+        # A100 40G does not support uint16.
         # T4, L4 and A100 accept uint16.
-        if False: # if GPU is A10, convert to int32
+        if True: # if GPU is A10, convert to int32
             npt = npt.astype(np.int32) 
         ptt = torch.tensor(npt, dtype=torch.long) # convert to torch.long
         return ptt
