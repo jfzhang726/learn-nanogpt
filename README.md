@@ -48,3 +48,12 @@ Option 2: use datasets.load_dataset()
 - DP: DataParallel, single process with multiple GPUs, each GPU is a process
 - DDP: DistributedDataParallel, multiple processes with multiple GPUs, each GPU is a process
 https://blog.csdn.net/deephub/article/details/111715288
+
+
+
+# model.require_backward_grad_sync
+Looks like the operation is removed in karpathy's code. Will look into it later. 
+```python
+            if ddp: # karpathy removed this operation
+                 model.require_backward_grad_sync = (micro_step + 1 == gradient_accumulation_steps)
+```
