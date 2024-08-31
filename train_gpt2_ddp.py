@@ -471,6 +471,7 @@ class DataLoaderLite:
         load a shard file which is a numpy file
         '''
         npt = np.load(filename) # np.uint16, as specified in fineweb.py
+        npt = npt.astype(np.int32) # A10 don't accept np.uint16, convert to int32
         ptt = torch.tensor(npt, dtype=torch.long) # convert to torch.long
         return ptt
 
