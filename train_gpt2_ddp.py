@@ -691,8 +691,10 @@ total_batch_size = 524288 # 2**19, ~0.5M tokens as specified in GPT3(?) paper, a
 # on lambda lab 1xA10 (24G), set B=16, will use ~20G GPU memory, process about 45K tokens/sec, can finish 10B tokens in 61 hours;
 # A10 does not support uint16 in tokenized training data, so I convert uint16 to int32, which is probably the reason for consuming a bit more memory?
 #  
+
+
 # Andrej uses GPU A100-SXM4-80GB, with 80G memory, can set B=64, 8 GPU process about 1.5M tokens/sec, can finish # 10B tokens in 1.85 hrs
-B = 64 # micro batch size (per GPU)
+B = 32 # micro batch size (per GPU)
 T = 1024 # sequence length (per GPU)
 # 16 * 1024 * ddp_world_size tokens in one forward 
 assert total_batch_size % (B*T*ddp_world_size) == 0, "total_batch_size should be divisible by B*T*ddp_world_size"
