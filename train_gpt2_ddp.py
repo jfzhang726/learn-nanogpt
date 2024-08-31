@@ -888,7 +888,7 @@ def train():
                 mask = mask.to(device)
                 # get logits 
                 with torch.no_grad():
-                    with torch.autocast(device_type=device.split(":")[0], dtype=torch.bfloat16):
+                    with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
                         logits, loss = model(tokens)
                     pred_norm = get_most_likely_row(tokens, mask, logits)
                 num_total += 1
@@ -922,7 +922,7 @@ def train():
             # can check what tokens would be at https://tiktokenizer.vercel.app/
             # got [15496, 11, 314, 1101, 257, 3303, 2746, 11]
             tokens = enc.encode(prefix) 
-            logger.info(f"Tokens: {tokens}")
+            # logger.info(f"Tokens: {tokens}")
             tokens = torch.tensor(tokens, dtype=torch.long) # shape (L)
             tokens = tokens.unsqueeze(0) # shape (1, L)
             tokens = tokens.repeat(num_return_sequences, 1) # shape (N, L)
@@ -970,7 +970,7 @@ def train():
             x, y = train_loader.next_batch()
             x, y = x.to(device), y.to(device)
             # device_type must be "cuda" instead of "cuda:0", "cuda:1" ...
-            with torch.autocast(device_type=device.split(":")[0], dtype=torch.bfloat16):
+            with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
                 logits, loss = model(x, y)
             # turn script execution into interactive mode
             #import code; code.interact(local=locals())
@@ -990,8 +990,8 @@ def train():
             # Here we want to accumulate gradients.
             # Now we have DDP. we don't want ddp to do communication (average) in every step except after the 
             # last of accumulation steps. 
-            if ddp:
-                model.require_backward_grad_sync = (micro_step + 1 == gradient_accumulation_steps)
+            # if ddp: # karpathy removed this operation
+            #     model.require_backward_grad_sync = (micro_step + 1 == gradient_accumulation_steps)
             loss.backward()
         # Below is for printing loss_accum only. don't confuse it with calculating average of gradients. 
         # Remember we want to print in main process only, but main process has its own loss_accum. The line below 
