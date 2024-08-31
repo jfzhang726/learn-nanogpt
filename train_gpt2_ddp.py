@@ -438,20 +438,15 @@ class GPT(nn.Module):
 # to make model close to GPT2.
 # 
 
+# download numpy files from huggingface
+repo_id = "jfzhang/edu_fineweb10B_tokens_npy_files"
+data_root = "edu_fineweb10B"
+from huggingface_hub import snapshot_download
+snapshot_download(repo_id=repo_id, repo_type="dataset", local_dir=data_root)
 
 #data_root = "edu_fineweb10B"
 # data_root = "/content/drive/MyDrive/Colab Notebooks/nanogpt/edu_fineweb10B/"
-data_root = "edu_fineweb10B"
 
-def load_tokens(filename):
-    '''
-    load a shard file which is a numpy file
-    '''
-    npt = np.load(filename) # np.uint16, as specified in fineweb.py
-    ptt = torch.tensor(npt, dtype=torch.long) # convert to torch.long
-    return ptt
-
-import tiktoken
 class DataLoaderLite:
     def __init__(self, B, T, process_rank, num_processes, split):
         self.B = B
@@ -459,16 +454,6 @@ class DataLoaderLite:
         self.process_rank = process_rank
         self.num_processes = num_processes
 
-        # with open('data/input.txt', 'r') as f:
-        #     text = f.read()
-        # self.enc = tiktoken.get_encoding("gpt2")
-        # tokens = self.enc.encode(text)
-        # self.tokens = torch.tensor(tokens)
-        # logger.info(f"Loaded {len(tokens)} tokens")
-        # logger.info(f"1 epoch = {len(self.tokens) // (self.B * self.T * self.num_processes)} batches")
-
-        # Unlike working with small file like tiny shakespear, in case of fineweb we tokenized dataset in advance and save token indices in a number of numpy files (see code edu_fineweb.py)
-        
         assert split in {'train', 'val'}
         # get shard names
 
@@ -481,13 +466,19 @@ class DataLoaderLite:
             logger.info(f"Found {len(self.shards)} {split} shards")
         self.reset()
 
+    def load_tokens(self, filename):
+        '''
+        load a shard file which is a numpy file
+        '''
+        npt = np.load(filename) # np.uint16, as specified in fineweb.py
+        ptt = torch.tensor(npt, dtype=torch.long) # convert to torch.long
+        return ptt
+
     def reset(self):
         # state --- initialize at 1st shard of the split
-        # self.current_position = 0 # if not ddp 
         self.current_shard = 0
-        self.tokens = load_tokens(self.shards[self.current_shard])
+        self.tokens = self.load_tokens(self.shards[self.current_shard])
         self.current_position = self.B * self.T * self.process_rank # if ddp, initial postion as for one process
-
 
     def next_batch(self):
         B, T = self.B, self.T
@@ -503,14 +494,13 @@ class DataLoaderLite:
             self.current_shard += 1
             if self.current_shard >= len(self.shards): # out of bound
                 self.current_shard = 0
-            self.tokens = load_tokens(self.shards[self.current_shard])
+            self.tokens = self.load_tokens(self.shards[self.current_shard])
             self.current_position = self.B * self.T * self.process_rank # reset starting position
             # now the resetting of position happens when reamining tokens are less than B*T*world_size. 
             # The batchs can be slightly different with multiple GPUs compared with one GPU, and we may observe 
             # that the losses in epoches might be slightly different from the running of one GPU.
             logger.info("Resetting data loader")
         return x, y
-
 
 
 # check code is correct or not by loading gpt2 weights into code
@@ -1021,5 +1011,5 @@ def train():
 
 
 
-
+train()
 
