@@ -694,7 +694,7 @@ total_batch_size = 524288 # 2**19, ~0.5M tokens as specified in GPT3(?) paper, a
 # on lambda lab 1xA10 (24G), set B=16, will use ~20G GPU memory, process about 45K tokens/sec, can finish 10B tokens in 61 hours;
 # A10 does not support uint16 in tokenized training data, so I convert uint16 to int32, which is probably the reason for consuming a bit more memory?
 # on lambda lab 8xV100 (16G), set B=8, will use 11.9-13.6G GPU memory, process about 390K tokens/sec, can finish 10B tokens in  7+ hours   
-
+# On lambda lab 8xA100 (80G), set B=64, will use 79.8-80.03 GB out of 81.9GB GPU memory, process about 1.1-1.2M tokens/sec, can finish 10B tokens in 2.52 hours (The actual hours is 2.88 hours, because there are evaluation steps in between training steps, and unoptimized code e.g. data loader, logging, etc.)
 
 # Andrej uses GPU A100-SXM4-80GB, with 80G memory, can set B=64, 8 GPU process about 1.5M tokens/sec, can finish # 10B tokens in 1.85 hrs
 B = 64 # micro batch size (per GPU)
