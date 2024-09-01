@@ -57,3 +57,23 @@ Looks like the operation is removed in karpathy's code. Will look into it later.
             if ddp: # karpathy removed this operation
                  model.require_backward_grad_sync = (micro_step + 1 == gradient_accumulation_steps)
 ```
+
+
+# One bug caused ddp hang
+The conidtion master_process stops other processes from exeucting code, however torch.distributed.all_reduce() will hang if some processes are not done with their job. 
+```python
+for step in range(max_steps):
+    if step % 250 == 0 and master_process:  # master_process condition caused ddp hang
+        model.eval()
+        ...
+        ...
+        if ddp:
+            torch.distributed.all_reduce(val_loss_accum, op=torch.distributed.ReduceOp.AVG)
+        ...
+        ...
+```
+
+
+
+# misc
+- V100 does not support bfloat16

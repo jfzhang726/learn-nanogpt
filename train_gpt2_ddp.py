@@ -693,11 +693,11 @@ total_batch_size = 524288 # 2**19, ~0.5M tokens as specified in GPT3(?) paper, a
 # 
 # on lambda lab 1xA10 (24G), set B=16, will use ~20G GPU memory, process about 45K tokens/sec, can finish 10B tokens in 61 hours;
 # A10 does not support uint16 in tokenized training data, so I convert uint16 to int32, which is probably the reason for consuming a bit more memory?
-#  
+# on lambda lab 8xV100 (16G), set B=8, will use 11.9-13.6G GPU memory, process about 390K tokens/sec, can finish 10B tokens in  7+ hours   
 
 
 # Andrej uses GPU A100-SXM4-80GB, with 80G memory, can set B=64, 8 GPU process about 1.5M tokens/sec, can finish # 10B tokens in 1.85 hrs
-B = 32 # micro batch size (per GPU)
+B = 64 # micro batch size (per GPU)
 T = 1024 # sequence length (per GPU)
 # 16 * 1024 * ddp_world_size tokens in one forward 
 assert total_batch_size % (B*T*ddp_world_size) == 0, "total_batch_size should be divisible by B*T*ddp_world_size"
@@ -839,7 +839,7 @@ def train():
         last_step = (step == max_steps - 1)
         # evaluate on validation set every 100 steps
         # Training data is roughly infinite so training loss and val loss should be about the same.
-        #if step % 250 == 0 and master_process:  # master_process condition is suspicious
+        #if step % 250 == 0 and master_process:  # master_process condition caused ddp hang
         if step % 250 == 0 or last_step:
             model.eval()
             val_loader.reset() # reset to start of data
@@ -850,7 +850,7 @@ def train():
                     x, y = val_loader.next_batch()
                     x, y = x.to(device), y.to(device)
                     # device_type must be "cuda" instead of "cuda:0", "cuda:1" ...
-                    with torch.autocast(device_type=device.split(":")[0], dtype=torch.bfloat16):
+                    with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
                         logits, loss = model(x, y)
                     loss = loss / val_loss_steps
                     val_loss_accum += loss.detach() 
@@ -936,7 +936,7 @@ def train():
             while xgen.size(1) < max_length:
                 # forward pass to get logits
                 with torch.no_grad(): 
-                    with torch.autocast(device_type=device.split(":")[0], dtype=torch.bfloat16):
+                    with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
                         logits, loss = model(xgen) # (B, T, vocab_size)
                     # take only the logits at the last position
                     logits = logits[:, -1, :] # (B, vocab_size)
