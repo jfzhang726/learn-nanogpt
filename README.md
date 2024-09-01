@@ -77,3 +77,4 @@ for step in range(max_steps):
 
 # misc
 - V100 does not support bfloat16
+- T4, L4, A10, A100 (40G) supports bfloat16
