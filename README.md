@@ -1,13 +1,17 @@
 # learn-nanogpt
 Learn Andrej Karpathy's nano-gpt tutorial
 
-It took me quite a while to finish watching the 4 hour long tutorial video. Reason one is that I literally wrote the code line by line, i.e. pause the video every few minutes to type the code, so the progress is slow. Reason two, more importantly, is that there are too many details to pay attention to, and many additional documents are read to understand the details. 
+Andrej Karpathy published a 4 hour long video in July 2024, explaning reproducing a GPT model. It took me quite a while to finish the tutorial video. Reason one is that I literally typed the code line by line, i.e. pause the video every few minutes to type the code, so the progress is slow. Reason two, more importantly, is that there are too many details to pay attention to, and many additional documents are read to understand the details. 
+
+I finally had a 125M GPT model trained in my hand. I want to record my experience of learning, coding, and training.  
 
 This document:
 - IS the note of my experience of learning, recording things that took me some time to figure out during learning and coding, but not elaborated or covered in the tutorial. 
 - IS NOT a note or transacript or review of the nano-gpt tutorial. Andrej Karpathy is an amazing teacher, his tutorial is clear and instructive. There is no need for additional review.
 
-This document is written after I finished the tutorial, and the order of the sections are rearranged to be more logical, instead of following the order of my learning and coding.
+This document is written after I finished the tutorial, and the order of the sections are rearranged to be more logical.
+
+I will start with the workflow of using Lmabdalab GPU instance, and then a number of highlights of what I learned from the tutorial and the code. 
 
 ## 1. Workflow of using Lmabdalab GPU instance 
 
@@ -117,7 +121,7 @@ Cursor IDE is a very smart AI assistant. It can write code, explain code, and de
 Configging GitHub on Cursor IDE is the same as in VSCode. 
 
 
-### 1.3 train model on Lambdalabs GPU instance
+### 1.3 train model on Lambdalabs GPU instance, and upload to Huggingface-Hub model repo
 <B> Step 1:</B> Create a Huggingface-Hub model repo
 
 I found the easiest way of using Huggingface-Hub model repo is to treat it as a git repo. 
@@ -160,13 +164,15 @@ pip install -r requirements.txt
 ```
 
 <B> Step 6:</B> start training
-Assume the training is on one node, 8 GPUs, the command is:
+The training was on one node, 8 GPUs, and the command was:
 ```bash
 torchrun --standalone --nproc_per_node=8 <training-script>
 ```
+This training did not take long (less than 3 hours). It was fun for me to watch the training log line by line real-time. (Note that it was the first time I use DDP and the first time I train a model with 8 GPUs.) 
 
-<B> Step 7:</B> when the training is run, clone the Huggingface-Hub model repo to GPU instance
-We will use git commands to upload checkpoints from GPU instance to Huggingface-Hub model repo. So we need to clone the repo to the GPU instance. 
+
+<B> Step 7:</B> when the training was running, I cloned the Huggingface-Hub model repo to GPU instance
+CPU was not busy during train, so I launched another terminal to clone the Huggingface-Hub model repo to the GPU instance. The repo was empty at the time. It was going to be used after training finished ---- I was going to use git commands to upload the best/last checkpoint from GPU instance to Huggingface-Hub model repo. 
 ```bash
 git clone https://<huggingface_username>:<huggingface_access_token>@huggingface.co/<huggingface_username>/<model-repo-name>
 
@@ -183,7 +189,7 @@ If the file extension used for checkpoint is not included in the .gitattributes 
 
 
 
-<B> Step 8:</B> after training, upload best checkpoints to Huggingface-Hub model repo
+<B> Step 8:</B> after training finished, I uploaded the last (and best) checkpoint to Huggingface-Hub model repo
 Copy the selected checkpoints to the local folder of model repo.
 ```bash
 cp <checkpoint-path> <model-repo-path>/<checkpoint-name>
@@ -197,8 +203,8 @@ git commit -m "add checkpoint"
 git push
 ```
 
-<B> Step 9:</B> (optional) download other checkpoints from GPU instance to Google Drive
-All the data on Lambdalabs instance will be deleted after the instance is terminated. If you want to keep the checkpoints other than the ones uploaded to Huggingface-Hub, you can download them to Google Drive.
+<B> Step 9:</B> (optional) I downloaded other checkpoints from GPU instance to Google Drive
+All the data on Lambdalabs instance will be deleted after the instance is terminated. If you want to keep the checkpoints other than the ones uploaded to Huggingface-Hub, you can download them to Google Drive like me.
 1. Start a Google Colab CPU notebook. 
 2. mount Google Drive
 3. Copy the ssh private key file used by Lambdalabs instance to the Colab instance at a path like ~/.ssh/<private-key-filename> 
@@ -209,6 +215,10 @@ All the data on Lambdalabs instance will be deleted after the instance is termin
 ```
 
 ## 2. Notes on the code
+
+
+
+
 
 
 # Gradient Accumulation vs DP vs DDP
