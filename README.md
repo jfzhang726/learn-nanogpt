@@ -214,22 +214,26 @@ All the data on Lambdalabs instance will be deleted after the instance is termin
 !scp -o StrictHostKeyChecking=no -i ~/.ssh/<private-key-filename> ubuntu@<gpu-instance-public-ip-address>:~/<checkpoint-path-on-gpu-instance> /content/drive/MyDrive/<path-on-google-drive>
 ```
 
-## 2. Notes on the code
+<details>
+<summary> Unfinished sections (click to expand) </summary>
+## 2. Notes 
+
+(in progress, too busy to write them these days)
 
 
 
 
-
-
-# Gradient Accumulation vs DP vs DDP
+## 2.xx Gradient Accumulation vs DP vs DDP
 - Gradient Accumulation: single process with single GPU, accumulate gradients in CPU memory then update parameters. 
-- DP: DataParallel, single process with multiple GPUs, each GPU is a process
+- DP: DataParallel, single process with multiple GPUs, each GPU is a thread
 - DDP: DistributedDataParallel, multiple processes with multiple GPUs, each GPU is a process
 https://blog.csdn.net/deephub/article/details/111715288
 
+## 2.xx from_pretrained()
 
+## 2.xx flash attention
 
-# model.require_backward_grad_sync
+## 2.xxx  model.require_backward_grad_sync
 Looks like the operation is removed in karpathy's code. Will look into it later. 
 ```python
             if ddp: # karpathy removed this operation
@@ -237,7 +241,7 @@ Looks like the operation is removed in karpathy's code. Will look into it later.
 ```
 
 
-# One bug caused ddp hang
+## 2.xxx A bug caused ddp hang
 The conidtion master_process stops other processes from exeucting code, however torch.distributed.all_reduce() will hang if some processes are not done with their job. 
 ```python
 for step in range(max_steps):
@@ -253,6 +257,9 @@ for step in range(max_steps):
 
 
 
-# misc
+## 2.xxx misc
 - V100 does not support bfloat16
 - T4, L4, A10, A100 (40G) supports bfloat16
+
+
+</details>
