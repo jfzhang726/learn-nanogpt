@@ -401,7 +401,7 @@ class GPT(nn.Module):
         return model
     
 
-    def configure_optimizers(self, weight_decay, learning_rate, device_type):
+    def configure_optimizers(self, weight_decay, learning_rate, device):
         # start with all of the candidate parameters (that require gradients)
         param_dict = {pn: p for pn, p in self.named_parameters() if p.requires_grad}
         # create optim groups, Any parameters that is 2D will be weight decayed, otherwise no.
@@ -420,9 +420,8 @@ class GPT(nn.Module):
         # fused is a lot faster. It 
         # https://pytorch.org/docs/stable/generated/torch.optim.AdamW.html
         fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
-        use_fused = fused_available and 'cuda' == device_type
-        if master_process:
-            logger.info(f"use_fused={use_fused}")
+        use_fused = fused_available and 'cuda' in str(device)
+        logger.info(f"use_fused={use_fused}")
         optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, betas=(0.9, 0.95), eps=1e-8, fused=use_fused)
         return optimizer
 
@@ -439,14 +438,20 @@ class GPT(nn.Module):
 # to make model close to GPT2.
 # 
 
-# download numpy files from huggingface
-repo_id = "jfzhang/edu_fineweb10B_tokens_npy_files"
-data_root = "edu_fineweb10B"
-from huggingface_hub import snapshot_download
-snapshot_download(repo_id=repo_id, repo_type="dataset", local_dir=data_root)
 
 #data_root = "edu_fineweb10B"
 # data_root = "/content/drive/MyDrive/Colab Notebooks/nanogpt/edu_fineweb10B/"
+data_root = "edu_fineweb10B"
+
+def load_tokens(filename):
+    '''
+    load a shard file which is a numpy file
+    '''
+    npt = np.load(filename) # np.uint16, as specified in fineweb.py
+    ptt = torch.tensor(npt, dtype=torch.long) # convert to torch.long
+    return ptt
+
+import tiktoken
 
 class DataLoaderLite:
     def __init__(self, B, T, process_rank, num_processes, split):
@@ -455,6 +460,16 @@ class DataLoaderLite:
         self.process_rank = process_rank
         self.num_processes = num_processes
 
+        # with open('data/input.txt', 'r') as f:
+        #     text = f.read()
+        # self.enc = tiktoken.get_encoding("gpt2")
+        # tokens = self.enc.encode(text)
+        # self.tokens = torch.tensor(tokens)
+        # logger.info(f"Loaded {len(tokens)} tokens")
+        # logger.info(f"1 epoch = {len(self.tokens) // (self.B * self.T * self.num_processes)} batches")
+
+        # Unlike working with small file like tiny shakespear, in case of fineweb we tokenized dataset in advance and save token indices in a number of numpy files (see code edu_fineweb.py)
+        
         assert split in {'train', 'val'}
         # get shard names
 
@@ -467,27 +482,13 @@ class DataLoaderLite:
             logger.info(f"Found {len(self.shards)} {split} shards")
         self.reset()
 
-    def load_tokens(self, filename):
-        '''
-        load a shard file which is a numpy file
-        '''
-        npt = np.load(filename) # np.uint16, as specified in fineweb.py
-        # A10 don't accept np.uint16, convert to int32. 
-        # A10 supports: float64, float32, float16, complex64, complex128, int64, int32, int16, int8, uint8, and bool.
-        # uint16 covers the numbers 0 to 65535 , while np.int16 covers the numbers −32768 to 32767. 
-        # So uint16 can't be converted to int16, but can be converted to int32.
-        # A100 40G does not support uint16.
-        # T4, L4 and A100 accept uint16.
-        if True: # if GPU is A10, convert to int32
-            npt = npt.astype(np.int32) 
-        ptt = torch.tensor(npt, dtype=torch.long) # convert to torch.long
-        return ptt
-
     def reset(self):
         # state --- initialize at 1st shard of the split
+        # self.current_position = 0 # if not ddp 
         self.current_shard = 0
-        self.tokens = self.load_tokens(self.shards[self.current_shard])
+        self.tokens = load_tokens(self.shards[self.current_shard])
         self.current_position = self.B * self.T * self.process_rank # if ddp, initial postion as for one process
+
 
     def next_batch(self):
         B, T = self.B, self.T
@@ -503,13 +504,14 @@ class DataLoaderLite:
             self.current_shard += 1
             if self.current_shard >= len(self.shards): # out of bound
                 self.current_shard = 0
-            self.tokens = self.load_tokens(self.shards[self.current_shard])
+            self.tokens = load_tokens(self.shards[self.current_shard])
             self.current_position = self.B * self.T * self.process_rank # reset starting position
             # now the resetting of position happens when reamining tokens are less than B*T*world_size. 
             # The batchs can be slightly different with multiple GPUs compared with one GPU, and we may observe 
             # that the losses in epoches might be slightly different from the running of one GPU.
             logger.info("Resetting data loader")
         return x, y
+
 
 
 # check code is correct or not by loading gpt2 weights into code
@@ -678,7 +680,6 @@ else:
     logger.info(f"Not using DDP, using device: {device}")
 
 
-device_type = "cuda" if device.startswith("cuda") else "cpu"
 # all the processes (GPUs) run the same copy of code below, not aware of the existence of other copies
 
 # set random seeds to ensure reproducibility
@@ -690,14 +691,8 @@ if torch.cuda.is_available():
 total_batch_size = 524288 # 2**19, ~0.5M tokens as specified in GPT3(?) paper, and make the number "nice" (power of 2)
 # on my colab instance with 1 GPU L4, set B = 16, will use 18.9/22.5 GB GPU memory, process about 35K tokens/sec,
 # will use ~80 hours to finish 10B tokens;
-# 
-# on lambda lab 1xA10 (24G), set B=16, will use ~20G GPU memory, process about 45K tokens/sec, can finish 10B tokens in 61 hours;
-# A10 does not support uint16 in tokenized training data, so I convert uint16 to int32, which is probably the reason for consuming a bit more memory?
-# on lambda lab 8xV100 (16G), set B=8, will use 11.9-13.6G GPU memory, process about 390K tokens/sec, can finish 10B tokens in  7+ hours   
-# On lambda lab 8xA100 (80G), set B=64, will use 79.8-80.03 GB out of 81.9GB GPU memory, process about 1.1-1.2M tokens/sec, can finish 10B tokens in 2.52 hours (The actual hours is 2.88 hours, because there are evaluation steps in between training steps, and unoptimized code e.g. data loader, logging, etc.)
-
 # Andrej uses GPU A100-SXM4-80GB, with 80G memory, can set B=64, 8 GPU process about 1.5M tokens/sec, can finish # 10B tokens in 1.85 hrs
-B = 64 # micro batch size (per GPU)
+B = 16 # micro batch size (per GPU)
 T = 1024 # sequence length (per GPU)
 # 16 * 1024 * ddp_world_size tokens in one forward 
 assert total_batch_size % (B*T*ddp_world_size) == 0, "total_batch_size should be divisible by B*T*ddp_world_size"
@@ -787,7 +782,7 @@ def get_lr(it):
 # eps = 1e-8
 #optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, betas=(0.9, 0.95), eps=1e-8)
 # config optimizer on raw_model instead of ddp model
-optimizer = raw_model.configure_optimizers(weight_decay=0.1, learning_rate=6e-4, device_type=device_type)
+optimizer = raw_model.configure_optimizers(weight_decay=0.1, learning_rate=6e-4, device=device)
 
 # create log dir to store checkpoints and logs
 
@@ -839,8 +834,7 @@ def train():
         last_step = (step == max_steps - 1)
         # evaluate on validation set every 100 steps
         # Training data is roughly infinite so training loss and val loss should be about the same.
-        #if step % 250 == 0 and master_process:  # master_process condition caused ddp hang
-        if step % 250 == 0 or last_step:
+        if step % 100 == 0 and master_process:
             model.eval()
             val_loader.reset() # reset to start of data
             with torch.no_grad():
@@ -850,7 +844,7 @@ def train():
                     x, y = val_loader.next_batch()
                     x, y = x.to(device), y.to(device)
                     # device_type must be "cuda" instead of "cuda:0", "cuda:1" ...
-                    with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
+                    with torch.autocast(device_type=device.split(":")[0], dtype=torch.bfloat16):
                         logits, loss = model(x, y)
                     loss = loss / val_loss_steps
                     val_loss_accum += loss.detach() 
@@ -861,7 +855,6 @@ def train():
                 with open(log_file, "a") as f:
                     f.write(f"{step} val {val_loss_accum.item():.4f}\n")
                 if step > 0 and (step % 5000 == 0 or last_step):
-                    logger.info(f"saving checkpoint at step {step}")
                     # save checkpoint
                     check_point_path = os.path.join(log_dir, f"model_{step:05d}.pt")
                     check_point = {
@@ -888,7 +881,7 @@ def train():
                 mask = mask.to(device)
                 # get logits 
                 with torch.no_grad():
-                    with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
+                    with torch.autocast(device_type=device.split(":")[0], dtype=torch.bfloat16):
                         logits, loss = model(tokens)
                     pred_norm = get_most_likely_row(tokens, mask, logits)
                 num_total += 1
@@ -922,7 +915,7 @@ def train():
             # can check what tokens would be at https://tiktokenizer.vercel.app/
             # got [15496, 11, 314, 1101, 257, 3303, 2746, 11]
             tokens = enc.encode(prefix) 
-            # logger.info(f"Tokens: {tokens}")
+            logger.info(f"Tokens: {tokens}")
             tokens = torch.tensor(tokens, dtype=torch.long) # shape (L)
             tokens = tokens.unsqueeze(0) # shape (1, L)
             tokens = tokens.repeat(num_return_sequences, 1) # shape (N, L)
@@ -936,7 +929,7 @@ def train():
             while xgen.size(1) < max_length:
                 # forward pass to get logits
                 with torch.no_grad(): 
-                    with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
+                    with torch.autocast(device_type=device.split(":")[0], dtype=torch.bfloat16):
                         logits, loss = model(xgen) # (B, T, vocab_size)
                     # take only the logits at the last position
                     logits = logits[:, -1, :] # (B, vocab_size)
@@ -970,7 +963,7 @@ def train():
             x, y = train_loader.next_batch()
             x, y = x.to(device), y.to(device)
             # device_type must be "cuda" instead of "cuda:0", "cuda:1" ...
-            with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
+            with torch.autocast(device_type=device.split(":")[0], dtype=torch.bfloat16):
                 logits, loss = model(x, y)
             # turn script execution into interactive mode
             #import code; code.interact(local=locals())
@@ -990,8 +983,8 @@ def train():
             # Here we want to accumulate gradients.
             # Now we have DDP. we don't want ddp to do communication (average) in every step except after the 
             # last of accumulation steps. 
-            # if ddp: # karpathy removed this operation
-            #     model.require_backward_grad_sync = (micro_step + 1 == gradient_accumulation_steps)
+            if ddp:
+                model.require_backward_grad_sync = (micro_step + 1 == gradient_accumulation_steps)
             loss.backward()
         # Below is for printing loss_accum only. don't confuse it with calculating average of gradients. 
         # Remember we want to print in main process only, but main process has its own loss_accum. The line below 
@@ -1029,5 +1022,5 @@ def train():
 
 
 
-train()
+
 
